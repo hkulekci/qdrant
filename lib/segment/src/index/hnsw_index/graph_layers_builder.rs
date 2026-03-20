@@ -889,6 +889,93 @@ mod tests {
         assert_eq!(reference_top.into_sorted_vec(), graph_search);
     }
 
+    /// Test that HNSW search correctly returns all duplicate vectors.
+    /// See: https://github.com/qdrant/qdrant/issues/1788
+    ///
+    /// When the dataset contains identical vectors stored at different point
+    /// offsets, a search for those vectors should return ALL of them (when
+    /// top >= number of duplicates), even with a modest EF value.
+    #[test]
+    fn test_hnsw_search_finds_all_duplicates() {
+        use crate::data_types::vectors::DenseVector;
+
+        const DIM: usize = 8;
+        const M: usize = 16;
+        const EF_CONSTRUCT: usize = 64;
+        const NUM_UNIQUE: usize = 200;
+        const NUM_DUPLICATES: usize = 5; // 5 copies of one vector
+        let num_vectors = NUM_UNIQUE + NUM_DUPLICATES;
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Build vectors: NUM_UNIQUE random vectors + NUM_DUPLICATES copies
+        // of a specific vector.
+        let duplicate_vector: DenseVector = random_vector(&mut rng, DIM);
+        let mut vectors: Vec<DenseVector> = Vec::with_capacity(num_vectors);
+        for _ in 0..NUM_UNIQUE {
+            vectors.push(random_vector(&mut rng, DIM));
+        }
+        // Append duplicate copies (indices NUM_UNIQUE..NUM_UNIQUE+NUM_DUPLICATES)
+        for _ in 0..NUM_DUPLICATES {
+            vectors.push(duplicate_vector.clone());
+        }
+
+        let vector_holder = TestRawScorerProducer::from_vectors(Distance::Cosine, &vectors);
+
+        let mut graph_layers_builder = GraphLayersBuilder::new(
+            num_vectors,
+            HnswM::new2(M),
+            EF_CONSTRUCT,
+            10,
+            true, // use_heuristic
+        );
+
+        for idx in 0..(num_vectors as PointOffsetType) {
+            let level = graph_layers_builder.get_random_layer(&mut rng);
+            graph_layers_builder.set_levels(idx, level);
+            graph_layers_builder.link_new_point(idx, vector_holder.internal_scorer(idx));
+        }
+
+        let graph = graph_layers_builder.into_graph_layers_ram(
+            GraphLinksFormat::Plain
+                .with_param_for_tests(vector_holder.graph_links_vectors().as_ref()),
+        );
+
+        // Search for the duplicate vector with top = NUM_DUPLICATES + 1
+        let top = NUM_DUPLICATES + 1;
+        let ef = 32; // modest EF
+        let scorer = vector_holder.scorer(duplicate_vector.clone());
+        let results = graph
+            .search(
+                top,
+                ef,
+                SearchAlgorithm::Hnsw,
+                scorer,
+                None,
+                &DEFAULT_STOPPED,
+            )
+            .unwrap();
+
+        // All duplicate point IDs
+        let duplicate_ids: Vec<PointOffsetType> =
+            (NUM_UNIQUE as PointOffsetType..(num_vectors as PointOffsetType)).collect();
+
+        let found_duplicate_ids: Vec<PointOffsetType> = results
+            .iter()
+            .map(|sp| sp.idx)
+            .filter(|idx| duplicate_ids.contains(idx))
+            .collect();
+
+        assert_eq!(
+            found_duplicate_ids.len(),
+            NUM_DUPLICATES,
+            "Expected all {NUM_DUPLICATES} duplicate vectors in search results, \
+             but only found {}. Results: {:?}",
+            found_duplicate_ids.len(),
+            results
+        );
+    }
+
     #[rstest]
     #[case::uncompressed(GraphLinksFormat::Plain)]
     #[case::compressed(GraphLinksFormat::Compressed)]

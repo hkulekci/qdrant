@@ -44,6 +44,16 @@ impl LinksContainer {
     }
 
     /// Put `m` candidates selected by the heuristic into the container.
+    ///
+    /// The heuristic skips candidates that are closer to an already-selected
+    /// neighbor than to the query (target). This promotes diversity in the
+    /// neighbor list.
+    ///
+    /// **Duplicate vector handling (issue #1788):** When a candidate has
+    /// *exactly* the same score to the target as an already-selected neighbor,
+    /// they are likely duplicate (identical) vectors. In that case the
+    /// heuristic check against that neighbor is skipped so that duplicates
+    /// remain reachable in the graph.
     pub fn fill_from_sorted_with_heuristic(
         &mut self,
         candidates: impl Iterator<Item = ScoredPointOffset>,
@@ -56,12 +66,26 @@ impl LinksContainer {
             self.processed_by_heuristic = 0;
             return;
         }
+        // Track the target-score of each selected neighbor so we can detect
+        // likely duplicate vectors (they always produce the exact same score
+        // to any given target).
+        let mut selected_scores: Vec<ScoreType> = Vec::with_capacity(level_m);
         'outer: for candidate in candidates {
-            for &existing in &self.links {
+            for (i, &existing) in self.links.iter().enumerate() {
                 if score(candidate.idx, existing) > candidate.score {
+                    // The candidate is closer to `existing` than to the
+                    // target — normally we would skip it. But if this
+                    // candidate has exactly the same target-score as the
+                    // existing neighbor, they are very likely duplicate
+                    // vectors: skip the heuristic check for *this pair*
+                    // and continue checking remaining neighbors.
+                    if selected_scores[i] == candidate.score {
+                        continue; // check next existing neighbor, don't reject candidate
+                    }
                     continue 'outer;
                 }
             }
+            selected_scores.push(candidate.score);
             self.links.push(candidate.idx);
             if self.links.len() >= level_m {
                 break;
@@ -204,9 +228,17 @@ impl LinksContainer {
                 if candidate.order.is_some() && existing.order.is_some() {
                     continue; // See (A).
                 }
-                if score(candidate.idx, existing.idx)
-                    > candidate.cached_score(target_point_id, &mut score)
-                {
+                let candidate_target_score = candidate.cached_score(target_point_id, &mut score);
+                if score(candidate.idx, existing.idx) > candidate_target_score {
+                    // Duplicate vector bypass (issue #1788): if the
+                    // candidate and existing neighbor have exactly the same
+                    // score to the target, they are likely duplicate vectors.
+                    // Skip the heuristic check for this pair.
+                    let existing_target_score =
+                        existing.cached_score(target_point_id, &mut score);
+                    if existing_target_score == candidate_target_score {
+                        continue; // check next existing, don't reject
+                    }
                     continue 'outer;
                 }
             }
@@ -388,6 +420,70 @@ mod tests {
             links_container.connect(id, 0, m, scorer);
         }
         assert_eq!(links_container.links(), &vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    /// Test that the heuristic correctly handles duplicate vectors.
+    /// See: https://github.com/qdrant/qdrant/issues/1788
+    ///
+    /// When multiple points have the exact same vector, the heuristic should
+    /// keep them in the neighbor list so that they remain reachable during search.
+    #[test]
+    fn test_heuristic_with_duplicate_vectors() {
+        let m = 8;
+
+        // Points layout (Euclidean, negated = higher is closer):
+        //   0 = Target at (10.0, 10.0)
+        //   1 = duplicate A at (10.5, 10.0)   distance  0.5 to target (CLOSEST)
+        //   2 = duplicate B at (10.5, 10.0)   SAME vector as 1
+        //   3 = duplicate C at (10.5, 10.0)   SAME vector as 1
+        //   4 = unique point at (8.0, 7.0)    distance ~3.61 to target
+        //   5 = unique point at (14.0, 10.0)  distance  4.0 to target
+        //   6 = unique point at (6.0, 10.0)   distance  4.0 to target
+        //
+        // The duplicates (1,2,3) are the 3 closest points to the target.
+        // Without the fix, heuristic selects only point 1 (first duplicate)
+        // and prunes 2 and 3 because score(2,1) = 0 > score(2,target) = -0.5.
+        let points: Vec<DenseVector> = vec![
+            vec![10.0, 10.0], // 0: Target
+            vec![10.5, 10.0], // 1: duplicate A
+            vec![10.5, 10.0], // 2: duplicate B (same as 1)
+            vec![10.5, 10.0], // 3: duplicate C (same as 1)
+            vec![8.0, 7.0],   // 4: unique
+            vec![14.0, 10.0], // 5: unique
+            vec![6.0, 10.0],  // 6: unique
+        ];
+
+        let scorer = |a: PointOffsetType, b: PointOffsetType| -> ScoreType {
+            -((points[a as usize][0] - points[b as usize][0]).powi(2)
+                + (points[a as usize][1] - points[b as usize][1]).powi(2))
+            .sqrt()
+        };
+
+        // Build candidates sorted by distance to target (point 0)
+        let mut candidates = FixedLengthPriorityQueue::new(6);
+        for id in 1..points.len() as PointOffsetType {
+            candidates.push(ScoredPointOffset {
+                idx: id,
+                score: scorer(0, id),
+            });
+        }
+
+        let mut links = LinksContainer::with_capacity(m);
+        links.fill_from_sorted_with_heuristic(candidates.into_iter_sorted(), m, scorer);
+
+        let selected = links.links().to_vec();
+
+        // The key assertion: all three duplicates (2, 3, 4) should be in
+        // the neighbor list. Without the fix, only one duplicate would be
+        // selected because the heuristic prunes points that are closer to
+        // an already-selected neighbor than to the target. Since duplicate
+        // vectors have maximum inter-similarity (distance 0), all but the
+        // first would be pruned.
+        let dup_count = selected.iter().filter(|&&id| id == 2 || id == 3 || id == 4).count();
+        assert!(
+            dup_count == 3,
+            "Expected all 3 duplicates in neighbor list, but only found {dup_count}. Selected: {selected:?}"
+        );
     }
 
     #[test]

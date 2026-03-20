@@ -72,6 +72,29 @@ impl TestRawScorerProducer {
         }
     }
 
+    /// Create a `TestRawScorerProducer` from a list of pre-defined vectors.
+    /// Useful for tests that need duplicate/identical vectors.
+    pub fn from_vectors(distance: Distance, vectors: &[DenseVector]) -> Self {
+        let dim = vectors.first().map_or(0, |v| v.len());
+        let mut storage = new_volatile_dense_vector_storage(dim, distance);
+        let hw_counter = HardwareCounterCell::new();
+        for (offset, vec) in vectors.iter().enumerate() {
+            let preprocessed = distance.preprocess_vector::<VectorElementType>(vec.clone());
+            storage
+                .insert_vector(
+                    offset as PointOffsetType,
+                    VectorRef::from(&preprocessed),
+                    &hw_counter,
+                )
+                .unwrap();
+        }
+        TestRawScorerProducer {
+            storage,
+            deleted_points: BitVec::repeat(false, vectors.len()),
+            quantized_vectors: None,
+        }
+    }
+
     pub fn storage(&self) -> &VectorStorageEnum {
         &self.storage
     }

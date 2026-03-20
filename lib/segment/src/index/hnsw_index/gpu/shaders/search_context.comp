@@ -121,6 +121,13 @@ uint run_heuristic() {
             ScoredPoint selected_point = shared_buffer[NEAREST_HEAP_OFFSET + j];
             float dist_to_already_selected = similarity(selected_point.id);
             if (dist_to_already_selected > current_closest.score) {
+                // Duplicate vector bypass (issue #1788): if the candidate
+                // and already-selected neighbor have the same score to the
+                // target, they are likely duplicate vectors — skip this
+                // check so both remain in the neighbor list.
+                if (selected_point.score == current_closest.score) {
+                    continue;
+                }
                 is_good = false;
                 break;
             }
