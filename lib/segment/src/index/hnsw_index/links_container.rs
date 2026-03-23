@@ -234,8 +234,7 @@ impl LinksContainer {
                     // candidate and existing neighbor have exactly the same
                     // score to the target, they are likely duplicate vectors.
                     // Skip the heuristic check for this pair.
-                    let existing_target_score =
-                        existing.cached_score(target_point_id, &mut score);
+                    let existing_target_score = existing.cached_score(target_point_id, &mut score);
                     if existing_target_score == candidate_target_score {
                         continue; // check next existing, don't reject
                     }
@@ -479,7 +478,10 @@ mod tests {
         // an already-selected neighbor than to the target. Since duplicate
         // vectors have maximum inter-similarity (distance 0), all but the
         // first would be pruned.
-        let dup_count = selected.iter().filter(|&&id| id == 2 || id == 3 || id == 4).count();
+        let dup_count = selected
+            .iter()
+            .filter(|&&id| id == 2 || id == 3 || id == 4)
+            .count();
         assert!(
             dup_count == 3,
             "Expected all 3 duplicates in neighbor list, but only found {dup_count}. Selected: {selected:?}"
